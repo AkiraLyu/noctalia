@@ -703,7 +703,8 @@ void Dock::reevaluateSmartAutoHide() {
       m_hoveredInstance = instance;
     }
 
-    const bool wantsPinned = shell::smart_auto_hide::smartWantsPinnedVisible(*m_platform, instance->output);
+    const auto dockRect = shell::dock::dockSmartAutoHideRect(*instance, m_config->config().shell.shadow);
+    const bool wantsPinned = shell::smartAutoHideWantsPinnedVisible(*m_platform, instance->output, dockRect);
     const bool pinnedChanged = wantsPinned != instance->smartAutoHidePinnedVisible;
     instance->smartAutoHidePinnedVisible = wantsPinned;
 
@@ -771,6 +772,7 @@ void Dock::createInstance(const WaylandOutput& output) {
   });
   instance->surface->setPrepareFrameCallback([this, inst](bool needsUpdate, bool needsLayout) {
     assertDockInitialized(m_platform, m_config, m_renderContext);
+    const auto prevPanelGeometry = inst->panelGeometry;
     shell::dock::prepareFrame(
         *inst, {.platform = *m_platform, .config = *m_config, .renderContext = *m_renderContext},
         shell::dock::DockInstanceCallbacks{
@@ -781,6 +783,9 @@ void Dock::createInstance(const WaylandOutput& output) {
         },
         needsUpdate, needsLayout
     );
+    if (inst->config.smartAutoHide && prevPanelGeometry != inst->panelGeometry) {
+      scheduleSmartAutoHideReevaluation();
+    }
   });
   instance->surface->setFrameTickCallback([this, inst](float deltaMs) {
     if (m_config == nullptr || m_renderContext == nullptr || !inst->config.magnification) {

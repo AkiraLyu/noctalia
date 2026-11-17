@@ -78,7 +78,7 @@ struct BarInstance {
   // bar-auto-hide-set off keeps autoHide true until the reveal completes; block hover helpers from replacing it.
   bool autoHideDisablePending = false;
   Timer autoHideDelayTimer;
-  // smart_auto_hide: active workspace empty (or overview open) — keep the bar visible.
+  // smart_auto_hide: no visible window overlaps the bar (or overview is open) — keep the bar visible.
   bool smartAutoHidePinnedVisible = false;
   bool pointerInside = false;
   float lastPointerSx = 0.0F;
