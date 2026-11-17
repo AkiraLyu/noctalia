@@ -26,6 +26,7 @@ public:
   NiriWorkspaceBackend& operator=(const NiriWorkspaceBackend&) = delete;
 
   void setChangeCallback(ChangeCallback callback) override;
+  void setWindowGeometryChangeCallback(ChangeCallback callback) override;
   void setOverviewChangeCallback(ChangeCallback callback) override;
   bool canTrackOverviewState() const noexcept override;
   bool hasOverviewState() const noexcept override { return m_overviewKnown; }
@@ -54,6 +55,7 @@ private:
     std::string title;
     std::int32_t x = 0;
     std::int32_t y = 0;
+    std::optional<WindowGeometry> geometry;
 
     bool operator==(const WindowState&) const = default;
   };
@@ -90,6 +92,7 @@ private:
   std::vector<const WorkspaceState*> sortedWorkspaceCandidatesForOutput(const std::string& outputName) const;
   void recomputeOccupancy();
   void notifyChanged() const;
+  void notifyWindowGeometryChanged() const;
   void notifyOverviewChanged() const;
 
   std::unordered_map<std::uint64_t, WindowState> m_windows;
@@ -99,5 +102,6 @@ private:
   bool m_overviewKnown = false;
   bool m_overviewOpen = false;
   ChangeCallback m_changeCallback;
+  ChangeCallback m_windowGeometryChangeCallback;
   ChangeCallback m_overviewChangeCallback;
 };

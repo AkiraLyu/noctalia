@@ -973,6 +973,10 @@ void Application::initWaylandCallbacks() {
     m_dock.refresh();
     m_windowSwitcher.onToplevelChange();
   });
+  m_compositorPlatform.setWindowGeometryChangeCallback([this] {
+    m_bar.scheduleSmartAutoHideReevaluation();
+    m_dock.scheduleSmartAutoHideReevaluation();
+  });
   if constexpr (kLockKeysEnabled) {
     if (lockKeysConsumersEnabled(m_configService.config())) {
       m_lockKeysService.refreshNow();

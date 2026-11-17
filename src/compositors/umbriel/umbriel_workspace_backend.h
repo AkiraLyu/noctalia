@@ -30,6 +30,7 @@ public:
 
   void setChangeCallback(ChangeCallback callback) override;
   void setWindowChangeCallback(ChangeCallback callback) override;
+  void setWindowGeometryChangeCallback(ChangeCallback callback) override;
   void setOverviewChangeCallback(ChangeCallback callback) override;
   bool canTrackOverviewState() const noexcept override;
   bool hasOverviewState() const noexcept override { return m_overviewKnown; }
@@ -45,6 +46,7 @@ public:
   std::unordered_map<std::string, std::vector<std::string>>
   appIdsByWorkspace(const std::string& outputName = {}) const override;
   std::vector<WorkspaceWindow> workspaceWindows(const std::string& outputName = {}) const override;
+  std::vector<WorkspaceWindow> collisionWindows(const std::string& outputName = {}) const override;
   bool hasExactWindowIdentity() const noexcept override { return true; }
   std::optional<std::string> focusedWindowId() const override;
   bool focusWindowById(const std::string& windowId, bool warpPointer = false) override;
@@ -58,9 +60,16 @@ private:
     std::string workspaceId;
     std::string appId;
     std::string title;
+    std::string outputName;
     bool active = false;
+    bool pinned = false;
+    std::optional<bool> visible;
     std::int32_t x = 0;
     std::int32_t y = 0;
+    std::int32_t width = 0;
+    std::int32_t height = 0;
+    bool hasTitleBar = false;
+    std::optional<std::int32_t> titleBarHeight;
     std::optional<WindowMinimizeState> minimizeState;
 
     bool operator==(const Window&) const = default;
@@ -75,17 +84,25 @@ private:
   std::unordered_set<std::string> m_occupiedWorkspaceIds;
   // IPC window snapshot in wire order: (window id, window).
   std::vector<std::pair<std::string, Window>> m_windows;
+  static constexpr std::int32_t kDefaultTitleBarHeight = 28;
+  std::int32_t m_titleBarHeight = kDefaultTitleBarHeight;
+  bool m_titleBarHeightResolved = false;
   std::optional<std::string> m_focusedWindowId;
   bool m_overviewKnown = false;
   bool m_overviewOpen = false;
   ChangeCallback m_changeCallback;
   ChangeCallback m_windowChangeCallback;
+  ChangeCallback m_windowGeometryChangeCallback;
   ChangeCallback m_overviewChangeCallback;
 
   const WorkspaceList* cachedWorkspaces(const std::string& outputName) const;
   std::string workspaceKeyForId(const std::string& workspaceId) const;
   static std::string workspaceKey(const std::string& id, const std::string& name);
+  void refreshTitleBarHeight(bool force);
+  std::int32_t resolvedTitleBarHeight(const Window& window) const noexcept;
+  WorkspaceWindow toWorkspaceWindow(const std::string& windowId, const Window& window) const;
   void notifyChanged() const;
   void notifyWindowsChanged() const;
+  void notifyWindowGeometryChanged() const;
   void notifyOverviewChanged() const;
 };
