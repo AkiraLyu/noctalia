@@ -6,6 +6,7 @@
 #include "shell/dock/dock_geometry.h"
 #include "shell/dock/dock_items.h"
 #include "shell/dock/dock_model.h"
+#include "shell/smart_auto_hide.h"
 #include "ui/signal.h"
 
 #include <cstdint>
@@ -75,7 +76,7 @@ namespace shell::dock {
     float hideOpacity = 0.0F;
     AnimationManager::Id hideAnimId = 0;
     Timer revealTimer;
-    // smart_auto_hide: active workspace empty (or overview open) — keep the dock visible.
+    // smart_auto_hide: no visible window overlaps the dock (or overview is open) — keep the dock visible.
     bool smartAutoHidePinnedVisible = false;
     Signal<>::ScopedConnection paletteConn;
     bool suppressItemClick = false; // set on press-release when a hold/drag consumed the gesture
@@ -116,5 +117,6 @@ namespace shell::dock {
   void applyDockCompositorBlur(DockInstance& instance, const DockConfig& cfg);
   void startHideFadeOut(DockInstance& instance);
   void revealAutoHideDock(DockInstance& instance);
+  shell::SmartAutoHideRect dockSmartAutoHideRect(const DockInstance& instance, const ShadowStyle& shadowConfig);
 
 } // namespace shell::dock

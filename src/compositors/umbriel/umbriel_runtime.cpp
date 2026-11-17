@@ -26,7 +26,7 @@ namespace compositors::umbriel {
     constexpr auto kReconnectMax = std::chrono::seconds(30);
     constexpr std::size_t kReadBufferMaxBytes = 1024U * 1024U;
     constexpr std::string_view kEventStreamRequest =
-        R"({"cmd":"subscribe","events":["windows","overview","keyboard_layout","workspaces","outputs"]})";
+        R"({"cmd":"subscribe","events":["theme","windows","overview","keyboard_layout","workspaces","outputs"]})";
 
     [[nodiscard]] bool waitForRequestSocket(int fd, short events, std::chrono::steady_clock::time_point deadline) {
       while (true) {
@@ -85,6 +85,28 @@ namespace compositors::umbriel {
     nlohmann::json request = nlohmann::json::object();
     request["cmd"] = cmd;
     return send(request);
+  }
+
+  std::optional<nlohmann::json> UmbrielRuntime::requestConfigValue(std::string_view key) const {
+    if (key.empty()) {
+      return std::nullopt;
+    }
+    nlohmann::json request = nlohmann::json::object();
+    request["cmd"] = "config-get";
+    request["args"] = nlohmann::json::array({key});
+    const auto reply = send(request);
+    if (!reply.has_value()) {
+      return std::nullopt;
+    }
+    const auto okIt = reply->find("ok");
+    if (okIt == reply->end() || !okIt->is_object()) {
+      return std::nullopt;
+    }
+    const auto valueIt = okIt->find("value");
+    if (valueIt == okIt->end()) {
+      return std::nullopt;
+    }
+    return *valueIt;
   }
 
   std::optional<nlohmann::json> UmbrielRuntime::send(const nlohmann::json& request) const {

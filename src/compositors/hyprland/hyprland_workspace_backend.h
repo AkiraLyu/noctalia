@@ -39,6 +39,7 @@ public:
   std::vector<Workspace> forOutput(wl_output* output) const override;
   std::unordered_map<std::string, std::vector<std::string>> appIdsByWorkspace(wl_output* output) const override;
   std::vector<WorkspaceWindow> workspaceWindows(wl_output* output) const override;
+  std::vector<WorkspaceWindow> collisionWindows(wl_output* output) const override;
   std::vector<std::string> openOverlayWorkspaceKeys(wl_output* output) const override;
   std::optional<std::string> focusedWindowId() const;
   void focusWindow(const std::string& windowId) override;
@@ -95,11 +96,17 @@ private:
 
   struct ToplevelState {
     std::string workspaceKey;
+    std::string monitorName;
     std::string appId;
     std::string title;
     bool urgent = false;
+    bool hidden = false;
+    bool mapped = true;
+    bool pinned = false;
     std::int32_t x = 0;
     std::int32_t y = 0;
+    std::int32_t width = 0;
+    std::int32_t height = 0;
   };
 
   void refreshSnapshot();
@@ -138,6 +145,7 @@ private:
   std::unordered_map<std::string, std::string> m_activeWorkspaceByMonitor;
   // Special workspace open on each monitor, absent when it shows its regular workspace.
   std::unordered_map<std::string, std::string> m_openSpecialWorkspaceByMonitor;
+  std::unordered_map<std::int64_t, std::string> m_monitorNameById;
   std::string m_focusedWindowId;
   std::size_t m_nextOrdinal = 0;
   IpcSchema m_ipcSchema = IpcSchema::Unknown;

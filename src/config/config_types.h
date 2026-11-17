@@ -184,7 +184,8 @@ struct BarConfig {
   bool enabled = true;
   bool autoHide = false;             // slide out when the pointer leaves; reveal on edge approach
   std::int32_t autoHideDelayMs = 0;  // wait after pointer leaves before hiding; 0 hides immediately
-  bool smartAutoHide = false;        // hide while the active workspace has windows; show when it is empty
+  // Dodge overlapping windows; falls back to workspace occupancy when window geometry is unavailable.
+  bool smartAutoHide = false;
   bool autoHideReserveSpace = false; // with auto_hide/smart_auto_hide: reserve layout only while the bar is visible
   bool showOnWorkspaceSwitch = true; // with auto_hide: briefly reveal when the active workspace changes
 
@@ -779,7 +780,8 @@ struct DockConfig {
   bool shadow = true;                       // use the global shell shadow
   bool showRunning = true;                  // also show running apps not in pinned list
   bool autoHide = false;                    // slide out when not hovered (overlay mode)
-  bool smartAutoHide = false;               // hide while the active workspace has windows; show when it is empty
+  // Dodge overlapping windows; falls back to workspace occupancy when window geometry is unavailable.
+  bool smartAutoHide = false;
   std::int32_t autoHideRevealDelayMs = 250; // pointer dwell on the edge strip before revealing; 0 reveals immediately
   std::string layer = "top";                // top | overlay
 

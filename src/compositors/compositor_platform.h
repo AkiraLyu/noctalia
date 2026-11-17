@@ -147,6 +147,7 @@ public:
   void activateKdeWindow(const std::string& title, const std::string& appId, const std::string& uuid = {});
 
   void setToplevelChangeCallback(ChangeCallback callback);
+  void setWindowGeometryChangeCallback(ChangeCallback callback);
   void bindHyprlandToplevelMappingManager(hyprland_toplevel_mapping_manager_v1* manager);
   void syncHyprlandToplevelMappings();
   std::optional<std::string> compositorWindowIdForToplevel(zwlr_foreign_toplevel_handle_v1* handle) const;
@@ -178,6 +179,7 @@ public:
   std::unordered_map<std::string, std::vector<std::string>> appIdsByWorkspace(wl_output* outputFilter = nullptr) const;
   std::vector<std::string> workspaceDisplayKeys(wl_output* outputFilter = nullptr) const;
   std::vector<WorkspaceWindowAssignment> workspaceWindowAssignments(wl_output* outputFilter = nullptr) const;
+  std::vector<WorkspaceWindowAssignment> collisionWindows(wl_output* outputFilter = nullptr) const;
   // Workspace keys of the overlay workspaces currently open on `outputFilter`
   // (nullptr = every output). Empty unless the active workspace backend tracks them.
   std::vector<std::string> openOverlayWorkspaceKeys(wl_output* outputFilter = nullptr) const;
@@ -231,12 +233,14 @@ private:
     std::uint32_t outputName = 0;
     std::vector<Workspace> workspaces;
     std::vector<WorkspaceWindowAssignment> assignments;
+    std::vector<WorkspaceWindowAssignment> collision;
   };
 
   void bindExtWorkspace(ext_workspace_manager_v1* manager);
   void bindKdeVirtualDesktop(org_kde_plasma_virtual_desktop_management* management);
   void bindDwlIpcWorkspace(zdwl_ipc_manager_v2* manager);
   void notifyToplevelsChanged();
+  void notifyWindowGeometryChanged();
   bool syncLabwcMetadata() const;
   void onOutputAdded(wl_output* output);
   void onOutputRemoved(wl_output* output);
@@ -246,6 +250,8 @@ private:
   static bool sameWorkspaceModelSnapshot(
       const std::vector<WorkspaceModelSnapshot>& lhs, const std::vector<WorkspaceModelSnapshot>& rhs
   );
+  static bool
+  sameCollisionSnapshot(const std::vector<WorkspaceModelSnapshot>& lhs, const std::vector<WorkspaceModelSnapshot>& rhs);
   bool extToplevelIsLive(const ext_foreign_toplevel_handle_v1* handle) const;
 
   WaylandConnection& m_wayland;
@@ -269,6 +275,7 @@ private:
   ChangeCallback m_overviewChangeCallback;
   ChangeCallback m_keyboardLayoutChangeCallback;
   ChangeCallback m_toplevelChangeCallback;
+  ChangeCallback m_windowGeometryChangeCallback;
   std::unique_ptr<compositors::hyprland::HyprlandToplevelMapping> m_hyprlandToplevelMapping;
   std::unique_ptr<compositors::kde::KwinActiveWindow> m_kwinActiveWindow;
   std::unique_ptr<OutputProbe> m_outputProbe;

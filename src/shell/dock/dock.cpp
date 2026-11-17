@@ -15,6 +15,7 @@
 #include "shell/dock/dock_model.h"
 #include "shell/dock/pinned_apps.h"
 #include "shell/panel/panel_manager.h"
+#include "shell/smart_auto_hide.h"
 #include "shell/tooltip/tooltip_manager.h"
 #include "shell/wayland/layer_surface.h"
 #include "shell/wayland/wayland_toplevels.h"
@@ -226,60 +227,6 @@ namespace {
       return {"dock", "monitor", instance.monitorOverrideTable, "pinned"};
     }
     return {"dock", "pinned"};
-  }
-
-  bool workspaceKeyMatchesAssignment(std::string_view assignmentKey, const Workspace& workspace) {
-    if (assignmentKey.empty()) {
-      return false;
-    }
-    if (!workspace.id.empty() && assignmentKey == workspace.id) {
-      return true;
-    }
-    if (!workspace.name.empty() && assignmentKey == workspace.name) {
-      return true;
-    }
-    if (workspace.index > 0 && assignmentKey == std::to_string(workspace.index)) {
-      return true;
-    }
-    return false;
-  }
-
-  bool activeWorkspaceHasWindows(const CompositorPlatform& platform, wl_output* output) {
-    const auto workspaces = platform.workspaces(output);
-    const Workspace* active = nullptr;
-    for (const auto& workspace : workspaces) {
-      if (workspace.active) {
-        active = &workspace;
-        break;
-      }
-    }
-    if (active == nullptr) {
-      return false;
-    }
-
-    const auto assignments = platform.workspaceWindowAssignments(output);
-    for (const auto& assignment : assignments) {
-      if (assignment.minimizeState.has_value() && assignment.minimizeState->minimized) {
-        continue;
-      }
-      if (workspaceKeyMatchesAssignment(assignment.workspaceKey, *active)) {
-        return true;
-      }
-    }
-    if (!assignments.empty()) {
-      return false;
-    }
-    if (platform.hasUnminimizedToplevels(output) == false) {
-      return false;
-    }
-    return active->occupied;
-  }
-
-  bool dockSmartAutoHideWantsPinnedVisible(const CompositorPlatform& platform, wl_output* output) {
-    if (platform.hasOverviewState() && platform.isOverviewOpen()) {
-      return true;
-    }
-    return !activeWorkspaceHasWindows(platform, output);
   }
 
 } // namespace
@@ -764,7 +711,8 @@ void Dock::reevaluateSmartAutoHide() {
       m_hoveredInstance = instance;
     }
 
-    const bool wantsPinned = dockSmartAutoHideWantsPinnedVisible(*m_platform, instance->output);
+    const auto dockRect = shell::dock::dockSmartAutoHideRect(*instance, m_config->config().shell.shadow);
+    const bool wantsPinned = shell::smartAutoHideWantsPinnedVisible(*m_platform, instance->output, dockRect);
     const bool pinnedChanged = wantsPinned != instance->smartAutoHidePinnedVisible;
     instance->smartAutoHidePinnedVisible = wantsPinned;
 
@@ -832,6 +780,7 @@ void Dock::createInstance(const WaylandOutput& output) {
   });
   instance->surface->setPrepareFrameCallback([this, inst](bool needsUpdate, bool needsLayout) {
     assertDockInitialized(m_platform, m_config, m_renderContext);
+    const auto prevPanelGeometry = inst->panelGeometry;
     shell::dock::prepareFrame(
         *inst, {.platform = *m_platform, .config = *m_config, .renderContext = *m_renderContext},
         shell::dock::DockInstanceCallbacks{
@@ -842,6 +791,9 @@ void Dock::createInstance(const WaylandOutput& output) {
         },
         needsUpdate, needsLayout
     );
+    if (inst->config.smartAutoHide && prevPanelGeometry != inst->panelGeometry) {
+      scheduleSmartAutoHideReevaluation();
+    }
   });
   instance->surface->setFrameTickCallback([this, inst](float deltaMs) {
     if (m_config == nullptr || m_renderContext == nullptr || !inst->config.magnification) {
