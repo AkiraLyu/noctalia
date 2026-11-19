@@ -21,6 +21,7 @@
 #include "shell/bar/widgets/taskbar_widget.h"
 #include "shell/bar/widgets/tray_widget.h"
 #include "shell/panel/panel_manager.h"
+#include "shell/smart_auto_hide.h"
 #include "shell/tooltip/tooltip_manager.h"
 #include "shell/tooltip/tooltip_placement.h"
 #include "shell/wayland/layer_shell.h"
@@ -73,60 +74,6 @@ namespace {
       return !instance.smartAutoHidePinnedVisible;
     }
     return instance.barConfig.autoHide;
-  }
-
-  bool workspaceKeyMatchesAssignment(std::string_view assignmentKey, const Workspace& workspace) {
-    if (assignmentKey.empty()) {
-      return false;
-    }
-    if (!workspace.id.empty() && assignmentKey == workspace.id) {
-      return true;
-    }
-    if (!workspace.name.empty() && assignmentKey == workspace.name) {
-      return true;
-    }
-    if (workspace.index > 0 && assignmentKey == std::to_string(workspace.index)) {
-      return true;
-    }
-    return false;
-  }
-
-  bool activeWorkspaceHasWindows(const CompositorPlatform& platform, wl_output* output) {
-    const auto workspaces = platform.workspaces(output);
-    const Workspace* active = nullptr;
-    for (const auto& workspace : workspaces) {
-      if (workspace.active) {
-        active = &workspace;
-        break;
-      }
-    }
-    if (active == nullptr) {
-      return false;
-    }
-
-    const auto assignments = platform.workspaceWindowAssignments(output);
-    for (const auto& assignment : assignments) {
-      if (assignment.minimizeState.has_value() && assignment.minimizeState->minimized) {
-        continue;
-      }
-      if (workspaceKeyMatchesAssignment(assignment.workspaceKey, *active)) {
-        return true;
-      }
-    }
-    if (!assignments.empty()) {
-      return false;
-    }
-    if (platform.hasUnminimizedToplevels(output) == false) {
-      return false;
-    }
-    return active->occupied;
-  }
-
-  bool smartAutoHideWantsPinnedVisible(const CompositorPlatform& platform, wl_output* output) {
-    if (platform.hasOverviewState() && platform.isOverviewOpen()) {
-      return true;
-    }
-    return !activeWorkspaceHasWindows(platform, output);
   }
 
   int barAutoHideEdgeGutter(const BarConfig& cfg) noexcept {
@@ -853,6 +800,39 @@ namespace {
         .width = surfaceWidth - x - std::min(marginEnds, bleedRight) - insetR,
         .height = barThickness,
     };
+  }
+
+  shell::SmartAutoHideRect barSmartAutoHideRect(const BarInstance& instance, const ShadowStyle& shadowConfig) {
+    const auto spec = computeBarSurfaceSpec(instance.barConfig, shadowConfig);
+    const bool isVertical = (instance.barConfig.position == "left" || instance.barConfig.position == "right");
+    std::uint32_t anchor = positionToAnchor(instance.barConfig.position);
+    std::int32_t mTop = spec.marginTop;
+    std::int32_t mRight = spec.marginRight;
+    std::int32_t mBottom = spec.marginBottom;
+    std::int32_t mLeft = spec.marginLeft;
+    std::int32_t surfW = isVertical ? static_cast<std::int32_t>(spec.surfaceWidth)
+                                    : std::max<std::int32_t>(1, instance.outputLogicalWidth - mLeft - mRight);
+    std::int32_t surfH = isVertical ? std::max<std::int32_t>(1, instance.outputLogicalHeight - mTop - mBottom)
+                                    : static_cast<std::int32_t>(spec.surfaceHeight);
+    if (instance.surface != nullptr && instance.surface->width() > 0 && instance.surface->height() > 0) {
+      anchor = instance.surface->anchor();
+      mTop = instance.surface->marginTop();
+      mRight = instance.surface->marginRight();
+      mBottom = instance.surface->marginBottom();
+      mLeft = instance.surface->marginLeft();
+      surfW = static_cast<std::int32_t>(instance.surface->width());
+      surfH = static_cast<std::int32_t>(instance.surface->height());
+    }
+    const float innerExt = barInnerSurfaceExtension(
+        instance.barConfig, shadowConfig, static_cast<float>(surfW), static_cast<float>(surfH)
+    );
+    const auto barVisual = computeBarVisualGeometry(
+        instance.barConfig, shadowConfig, static_cast<float>(surfW), static_cast<float>(surfH), innerExt
+    );
+    return shell::computeOutputLocalVisualRect(
+        anchor, mTop, mRight, mBottom, mLeft, surfW, surfH, instance.outputLogicalWidth, instance.outputLogicalHeight,
+        barVisual.x, barVisual.y, barVisual.width, barVisual.height
+    );
   }
 
   InputRect barContentInputRegion(const BarConfig& cfg, const ShadowStyle& shadow, int surfW, int surfH) {
@@ -1802,7 +1782,8 @@ void Bar::reevaluateSmartAutoHide() {
       continue;
     }
 
-    const bool wantsPinned = smartAutoHideWantsPinnedVisible(*m_platform, instance->output);
+    const auto barRect = barSmartAutoHideRect(*instance, m_config->config().shell.shadow);
+    const bool wantsPinned = shell::smartAutoHideWantsPinnedVisible(*m_platform, instance->output, barRect);
     const bool pinnedChanged = wantsPinned != instance->smartAutoHidePinnedVisible;
     instance->smartAutoHidePinnedVisible = wantsPinned;
 
@@ -3595,7 +3576,14 @@ void Bar::buildScene(BarInstance& instance, std::uint32_t width, std::uint32_t h
     });
 
     if (instance.barConfig.smartAutoHide && m_platform != nullptr) {
-      instance.smartAutoHidePinnedVisible = smartAutoHideWantsPinnedVisible(*m_platform, instance.output);
+      const auto barRect = shell::computeOutputLocalVisualRect(
+          instance.surface->anchor(), instance.surface->marginTop(), instance.surface->marginRight(),
+          instance.surface->marginBottom(), instance.surface->marginLeft(), static_cast<std::int32_t>(width),
+          static_cast<std::int32_t>(height), instance.outputLogicalWidth, instance.outputLogicalHeight, barAreaX,
+          barAreaY, barAreaW, barAreaH
+      );
+      instance.smartAutoHidePinnedVisible =
+          shell::smartAutoHideWantsPinnedVisible(*m_platform, instance.output, barRect);
     }
     if (barConfigUsesSlideSurface(instance.barConfig)) {
       instance.slideRoot->setOpacity(1.0F);
@@ -4269,9 +4257,19 @@ std::string Bar::setBarAutoHideIpc(std::string_view args) {
       if (instance.slideRoot != nullptr) {
         instance.slideRoot->setOpacity(1.0F);
       }
+      if (smart && m_platform != nullptr) {
+        instance.smartAutoHidePinnedVisible = shell::smartAutoHideWantsPinnedVisible(
+            *m_platform, instance.output, barSmartAutoHideRect(instance, m_config->config().shell.shadow)
+        );
+      } else {
+        instance.smartAutoHidePinnedVisible = false;
+      }
       const bool suppressAutoHide =
           (m_autoHideSuppressionCallback != nullptr) ? m_autoHideSuppressionCallback(instance) : false;
-      if (instance.pointerInside || instance.attachedPopupCount > 0 || suppressAutoHide) {
+      if ((smart && instance.smartAutoHidePinnedVisible)
+          || instance.pointerInside
+          || instance.attachedPopupCount > 0
+          || suppressAutoHide) {
         revealAutoHideBar(instance);
       } else {
         startHideFadeOut(instance, true);

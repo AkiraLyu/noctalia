@@ -168,6 +168,17 @@ std::vector<WorkspaceWindow> HyprlandWorkspaceBackend::workspaceWindows(wl_outpu
       continue;
     }
 
+    std::optional<WindowGeometry> geometry;
+    if (toplevel.width > 0 && toplevel.height > 0) {
+      geometry = WindowGeometry{
+          .x = toplevel.x,
+          .y = toplevel.y,
+          .width = toplevel.width,
+          .height = toplevel.height,
+          .globalCoordinates = true,
+      };
+    }
+
     result.push_back(
         WorkspaceWindow{
             .windowId = compositors::hyprland::formatWindowAddress(address),
@@ -176,7 +187,11 @@ std::vector<WorkspaceWindow> HyprlandWorkspaceBackend::workspaceWindows(wl_outpu
             .title = toplevel.title,
             .x = toplevel.x,
             .y = toplevel.y,
-            .outputName = {},
+            .outputName = toplevel.monitorName,
+            .minimizeState = std::nullopt,
+            .geometry = geometry,
+            .visibleOnScreen = toplevel.mapped && !toplevel.hidden,
+            .pinned = toplevel.pinned,
         }
     );
   }
@@ -192,6 +207,93 @@ std::vector<WorkspaceWindow> HyprlandWorkspaceBackend::workspaceWindows(wl_outpu
     }
     return a.windowId < b.windowId;
   });
+  return result;
+}
+
+std::vector<WorkspaceWindow> HyprlandWorkspaceBackend::collisionWindows(wl_output* output) const {
+  ensureSnapshotFresh();
+
+  const std::string outputName = m_outputNameResolver != nullptr ? m_outputNameResolver(output) : std::string{};
+  const bool filterByOutput = output != nullptr && !outputName.empty();
+
+  std::unordered_set<std::string> workspacesOnOutput;
+  std::unordered_map<std::string, std::string> monitorByWorkspace;
+  workspacesOnOutput.reserve(m_workspaces.size());
+  for (const auto& workspace : m_workspaces) {
+    if (!workspace.monitor.empty()) {
+      monitorByWorkspace.emplace(workspace.identity.key, workspace.monitor);
+    }
+    if (filterByOutput && workspace.monitor != outputName) {
+      continue;
+    }
+    workspacesOnOutput.insert(workspace.identity.key);
+  }
+
+  std::vector<WorkspaceWindow> result;
+  result.reserve(m_toplevels.size());
+  for (const auto& [address, toplevel] : m_toplevels) {
+    if (toplevel.workspaceKey.empty() || (m_ipcSchema == IpcSchema::LegacyId && toplevel.workspaceKey == "-1")) {
+      continue;
+    }
+    if (filterByOutput) {
+      const bool onOutput = !toplevel.monitorName.empty()
+          ? (toplevel.monitorName == outputName)
+          : (m_workspaces.empty() || workspacesOnOutput.contains(toplevel.workspaceKey));
+      if (!onOutput) {
+        continue;
+      }
+    }
+
+    bool visible = toplevel.mapped && !toplevel.hidden;
+    if (visible && !toplevel.pinned) {
+      std::string monitor = toplevel.monitorName;
+      if (monitor.empty()) {
+        if (const auto wsMonIt = monitorByWorkspace.find(toplevel.workspaceKey); wsMonIt != monitorByWorkspace.end()) {
+          monitor = wsMonIt->second;
+        }
+      }
+      if (!monitor.empty()) {
+        const auto activeIt = m_activeWorkspaceByMonitor.find(monitor);
+        const auto specialIt = m_openSpecialWorkspaceByMonitor.find(monitor);
+        const bool hasKnownMonitorState =
+            activeIt != m_activeWorkspaceByMonitor.end() || specialIt != m_openSpecialWorkspaceByMonitor.end();
+        if (hasKnownMonitorState) {
+          const bool matchesActive =
+              activeIt != m_activeWorkspaceByMonitor.end() && activeIt->second == toplevel.workspaceKey;
+          const bool matchesSpecial =
+              specialIt != m_openSpecialWorkspaceByMonitor.end() && specialIt->second == toplevel.workspaceKey;
+          visible = matchesActive || matchesSpecial;
+        }
+      }
+    }
+
+    std::optional<WindowGeometry> geometry;
+    if (toplevel.width > 0 && toplevel.height > 0) {
+      geometry = WindowGeometry{
+          .x = toplevel.x,
+          .y = toplevel.y,
+          .width = toplevel.width,
+          .height = toplevel.height,
+          .globalCoordinates = true,
+      };
+    }
+
+    result.push_back(
+        WorkspaceWindow{
+            .windowId = compositors::hyprland::formatWindowAddress(address),
+            .workspaceKey = assignmentKeyFor(toplevel.workspaceKey),
+            .appId = toplevel.appId,
+            .title = toplevel.title,
+            .x = toplevel.x,
+            .y = toplevel.y,
+            .outputName = toplevel.monitorName,
+            .minimizeState = std::nullopt,
+            .geometry = geometry,
+            .visibleOnScreen = visible,
+            .pinned = toplevel.pinned,
+        }
+    );
+  }
   return result;
 }
 
@@ -245,6 +347,7 @@ void HyprlandWorkspaceBackend::notifyCleanup() {
   m_toplevels.clear();
   m_activeWorkspaceByMonitor.clear();
   m_openSpecialWorkspaceByMonitor.clear();
+  m_monitorNameById.clear();
   m_focusedWindowId.clear();
   m_nextOrdinal = 0;
   m_ipcSchema = IpcSchema::Unknown;
@@ -496,6 +599,7 @@ void HyprlandWorkspaceBackend::refreshMonitors() {
 
   std::unordered_map<std::string, std::string> activeByMonitor;
   std::unordered_map<std::string, std::string> specialByMonitor;
+  std::unordered_map<std::int64_t, std::string> monitorNameById;
   for (const auto& item : *json) {
     if (!item.is_object()) {
       continue;
@@ -503,6 +607,9 @@ void HyprlandWorkspaceBackend::refreshMonitors() {
     const std::string monitorName = item.value("name", "");
     if (monitorName.empty()) {
       continue;
+    }
+    if (const auto idIt = item.find("id"); idIt != item.end() && idIt->is_number_integer()) {
+      monitorNameById.emplace(idIt->get<std::int64_t>(), monitorName);
     }
 
     const auto activeIt = item.find("activeWorkspace");
@@ -527,6 +634,7 @@ void HyprlandWorkspaceBackend::refreshMonitors() {
 
   m_activeWorkspaceByMonitor = std::move(activeByMonitor);
   m_openSpecialWorkspaceByMonitor = std::move(specialByMonitor);
+  m_monitorNameById = std::move(monitorNameById);
 }
 
 void HyprlandWorkspaceBackend::refreshClients() {
@@ -578,8 +686,34 @@ void HyprlandWorkspaceBackend::refreshClients() {
     }
     state.title = StringUtils::windowTitleSingleLine(item.value("title", ""));
     if (const auto atIt = item.find("at"); atIt != item.end() && atIt->is_array() && atIt->size() >= 2) {
-      state.x = (*atIt)[0].get<std::int32_t>();
-      state.y = (*atIt)[1].get<std::int32_t>();
+      if ((*atIt)[0].is_number_integer() && (*atIt)[1].is_number_integer()) {
+        state.x = (*atIt)[0].get<std::int32_t>();
+        state.y = (*atIt)[1].get<std::int32_t>();
+      }
+    }
+    if (const auto sizeIt = item.find("size"); sizeIt != item.end() && sizeIt->is_array() && sizeIt->size() >= 2) {
+      if ((*sizeIt)[0].is_number_integer() && (*sizeIt)[1].is_number_integer()) {
+        state.width = (*sizeIt)[0].get<std::int32_t>();
+        state.height = (*sizeIt)[1].get<std::int32_t>();
+      }
+    }
+    if (const auto hiddenIt = item.find("hidden"); hiddenIt != item.end() && hiddenIt->is_boolean()) {
+      state.hidden = hiddenIt->get<bool>();
+    }
+    if (const auto mappedIt = item.find("mapped"); mappedIt != item.end() && mappedIt->is_boolean()) {
+      state.mapped = mappedIt->get<bool>();
+    }
+    if (const auto pinnedIt = item.find("pinned"); pinnedIt != item.end() && pinnedIt->is_boolean()) {
+      state.pinned = pinnedIt->get<bool>();
+    }
+    if (const auto monIt = item.find("monitor"); monIt != item.end()) {
+      if (monIt->is_number_integer()) {
+        if (const auto nameIt = m_monitorNameById.find(monIt->get<std::int64_t>()); nameIt != m_monitorNameById.end()) {
+          state.monitorName = nameIt->second;
+        }
+      } else if (monIt->is_string()) {
+        state.monitorName = monIt->get<std::string>();
+      }
     }
 
     bool urgent = false;
@@ -916,6 +1050,13 @@ void HyprlandWorkspaceBackend::handleEvent(std::string_view event, std::string_v
     }
     moveToplevel(*address, identity->key);
     refreshMonitors();
+    refreshClients();
+    recomputeWorkspaceFlags();
+    notifyChanged();
+    return;
+  }
+
+  if (event == "fullscreen" || event == "changefloatingmode") {
     refreshClients();
     recomputeWorkspaceFlags();
     notifyChanged();

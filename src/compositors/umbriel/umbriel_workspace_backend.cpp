@@ -1,9 +1,14 @@
 #include "compositors/umbriel/umbriel_workspace_backend.h"
 
 #include "compositors/umbriel/umbriel_runtime.h"
+#include "config/toml.h"
 #include "core/log.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <system_error>
 #include <unordered_set>
 #include <utility>
 
@@ -17,6 +22,28 @@ namespace {
       return {};
     }
     return it->get<std::string>();
+  }
+
+  std::int32_t jsonInt32(const nlohmann::json& json, std::string_view key) {
+    const auto it = json.find(key);
+    if (it == json.end()) {
+      return 0;
+    }
+    if (it->is_number_integer()) {
+      return it->get<std::int32_t>();
+    }
+    if (it->is_number_unsigned()) {
+      return static_cast<std::int32_t>(it->get<std::uint32_t>());
+    }
+    if (it->is_number_float()) {
+      return static_cast<std::int32_t>(std::lround(it->get<double>()));
+    }
+    return 0;
+  }
+
+  bool jsonBool(const nlohmann::json& json, std::string_view key) {
+    const auto it = json.find(key);
+    return it != json.end() && it->is_boolean() && it->get<bool>();
   }
 
   std::optional<WindowMinimizeState> parseMinimizeState(const nlohmann::json& entry) {
@@ -35,6 +62,90 @@ namespace {
     };
   }
 
+  std::optional<std::int32_t> jsonNonNegativeInt32(const nlohmann::json& value) {
+    if (value.is_number_integer()) {
+      const auto raw = value.get<std::int64_t>();
+      return raw >= 0 ? std::optional<std::int32_t>(static_cast<std::int32_t>(std::min<std::int64_t>(raw, 400)))
+                      : std::nullopt;
+    }
+    if (value.is_number_unsigned()) {
+      const auto raw = value.get<std::uint64_t>();
+      return std::optional<std::int32_t>(static_cast<std::int32_t>(std::min<std::uint64_t>(raw, 400)));
+    }
+    if (value.is_number_float()) {
+      const auto rounded = static_cast<std::int64_t>(std::lround(value.get<double>()));
+      return rounded >= 0 ? std::optional<std::int32_t>(static_cast<std::int32_t>(std::min<std::int64_t>(rounded, 400)))
+                          : std::nullopt;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<std::filesystem::path> findUmbrielConfigFile() {
+    auto isRegularFile = [](const std::filesystem::path& path) {
+      std::error_code ec;
+      const auto status = std::filesystem::status(path, ec);
+      return !ec && std::filesystem::is_regular_file(status);
+    };
+
+    if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
+        xdgConfigHome != nullptr && xdgConfigHome[0] != '\0') {
+      const auto candidate = std::filesystem::path(xdgConfigHome) / "umbriel/config.toml";
+      if (isRegularFile(candidate)) {
+        return candidate;
+      }
+    } else if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+      const auto candidate = std::filesystem::path(home) / ".config/umbriel/config.toml";
+      if (isRegularFile(candidate)) {
+        return candidate;
+      }
+    }
+
+    const char* configuredDirs = std::getenv("XDG_CONFIG_DIRS");
+    const std::string_view configDirs = configuredDirs != nullptr && configuredDirs[0] != '\0'
+        ? std::string_view(configuredDirs)
+        : std::string_view("/etc/xdg");
+    std::size_t offset = 0;
+    while (offset <= configDirs.size()) {
+      const std::size_t sep = configDirs.find(':', offset);
+      const std::string_view dir = configDirs.substr(offset, sep - offset);
+      if (!dir.empty()) {
+        const auto candidate = std::filesystem::path(dir) / "umbriel/config.toml";
+        if (isRegularFile(candidate)) {
+          return candidate;
+        }
+      }
+      if (sep == std::string_view::npos) {
+        break;
+      }
+      offset = sep + 1;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<std::int32_t> readTitleBarHeightFromConfigFile() {
+    const auto configPath = findUmbrielConfigFile();
+    if (!configPath.has_value()) {
+      return std::nullopt;
+    }
+    try {
+      const toml::table root = toml::parse_file(configPath->string());
+      const auto* appearance = root["appearance"].as_table();
+      if (appearance == nullptr) {
+        return std::nullopt;
+      }
+      const auto* titleBar = (*appearance)["title_bar"].as_table();
+      if (titleBar == nullptr) {
+        return std::nullopt;
+      }
+      if (const auto height = (*titleBar)["height"].value<std::int64_t>(); height.has_value() && *height >= 0) {
+        return static_cast<std::int32_t>(std::min<std::int64_t>(*height, 400));
+      }
+    } catch (const toml::parse_error&) {
+      return std::nullopt;
+    }
+    return std::nullopt;
+  }
+
 } // namespace
 
 UmbrielWorkspaceBackend::UmbrielWorkspaceBackend(compositors::umbriel::UmbrielRuntime& runtime)
@@ -46,6 +157,10 @@ void UmbrielWorkspaceBackend::setChangeCallback(ChangeCallback callback) { m_cha
 
 void UmbrielWorkspaceBackend::setWindowChangeCallback(ChangeCallback callback) {
   m_windowChangeCallback = std::move(callback);
+}
+
+void UmbrielWorkspaceBackend::setWindowGeometryChangeCallback(ChangeCallback callback) {
+  m_windowGeometryChangeCallback = std::move(callback);
 }
 
 void UmbrielWorkspaceBackend::setOverviewChangeCallback(ChangeCallback callback) {
@@ -149,6 +264,77 @@ UmbrielWorkspaceBackend::appIdsByWorkspace(const std::string& outputName) const 
   return result;
 }
 
+std::int32_t UmbrielWorkspaceBackend::resolvedTitleBarHeight(const Window& window) const noexcept {
+  if (window.titleBarHeight.has_value()) {
+    return std::max<std::int32_t>(0, *window.titleBarHeight);
+  }
+  return window.hasTitleBar ? std::max<std::int32_t>(0, m_titleBarHeight) : 0;
+}
+
+void UmbrielWorkspaceBackend::refreshTitleBarHeight(bool force) {
+  if (m_titleBarHeightResolved && !force) {
+    return;
+  }
+  std::int32_t resolved = kDefaultTitleBarHeight;
+  if (m_runtime.available()) {
+    bool resolvedFromIpc = false;
+    if (const auto value = m_runtime.requestConfigValue("appearance.title_bar.height"); value.has_value()) {
+      if (const auto parsed = jsonNonNegativeInt32(*value); parsed.has_value()) {
+        resolved = *parsed;
+        resolvedFromIpc = true;
+      }
+    }
+    if (!resolvedFromIpc) {
+      if (const auto fromConfig = readTitleBarHeightFromConfigFile(); fromConfig.has_value()) {
+        resolved = *fromConfig;
+      }
+    }
+  }
+  m_titleBarHeightResolved = true;
+  if (resolved == m_titleBarHeight) {
+    return;
+  }
+  m_titleBarHeight = resolved;
+  const bool affectsWindows = std::ranges::any_of(m_windows, [](const auto& entry) {
+    return entry.second.hasTitleBar && !entry.second.titleBarHeight.has_value();
+  });
+  if (!affectsWindows) {
+    return;
+  }
+  if (m_windowGeometryChangeCallback) {
+    notifyWindowGeometryChanged();
+  } else {
+    notifyWindowsChanged();
+  }
+}
+
+WorkspaceWindow UmbrielWorkspaceBackend::toWorkspaceWindow(const std::string& windowId, const Window& window) const {
+  const std::int32_t titleBarHeight = resolvedTitleBarHeight(window);
+  std::optional<WindowGeometry> geometry;
+  if (window.width > 0 && window.height > 0) {
+    geometry = WindowGeometry{
+        .x = window.x,
+        .y = window.y - titleBarHeight,
+        .width = window.width,
+        .height = window.height + titleBarHeight,
+        .globalCoordinates = true,
+    };
+  }
+  return WorkspaceWindow{
+      .windowId = windowId,
+      .workspaceKey = window.workspaceId.empty() ? std::string{} : workspaceKeyForId(window.workspaceId),
+      .appId = window.appId,
+      .title = window.title,
+      .x = window.x,
+      .y = window.y,
+      .outputName = window.outputName,
+      .minimizeState = window.minimizeState,
+      .geometry = geometry,
+      .visibleOnScreen = window.visible,
+      .pinned = window.pinned,
+  };
+}
+
 std::vector<WorkspaceWindow> UmbrielWorkspaceBackend::workspaceWindows(const std::string& outputName) const {
   std::vector<WorkspaceWindow> result;
   result.reserve(m_windows.size());
@@ -162,18 +348,30 @@ std::vector<WorkspaceWindow> UmbrielWorkspaceBackend::workspaceWindows(const std
     if (!prefix.empty() && !window.workspaceId.starts_with(prefix)) {
       continue;
     }
-    result.push_back(
-        WorkspaceWindow{
-            .windowId = windowId,
-            .workspaceKey = workspaceKeyForId(window.workspaceId),
-            .appId = window.appId,
-            .title = window.title,
-            .x = window.x,
-            .y = window.y,
-            .outputName = {},
-            .minimizeState = window.minimizeState,
-        }
-    );
+    WorkspaceWindow row = toWorkspaceWindow(windowId, window);
+    row.outputName.clear();
+    result.push_back(std::move(row));
+  }
+  return result;
+}
+
+std::vector<WorkspaceWindow> UmbrielWorkspaceBackend::collisionWindows(const std::string& outputName) const {
+  std::vector<WorkspaceWindow> result;
+  result.reserve(m_windows.size());
+  const std::string prefix = outputName.empty() ? std::string{} : outputName + ":";
+  for (const auto& [windowId, window] : m_windows) {
+    if (!outputName.empty()) {
+      const bool matchesOutput = !window.outputName.empty()
+          ? (window.outputName == outputName)
+          : (!window.workspaceId.empty() && window.workspaceId.starts_with(prefix));
+      if (!matchesOutput) {
+        continue;
+      }
+    }
+    if (window.workspaceId.empty() && window.visible != true && !window.pinned) {
+      continue;
+    }
+    result.push_back(toWorkspaceWindow(windowId, window));
   }
   return result;
 }
@@ -211,6 +409,8 @@ void UmbrielWorkspaceBackend::handleStreamReset() {
   m_windows.clear();
   m_workspacesByOutput.clear();
   m_occupiedWorkspaceIds.clear();
+  m_titleBarHeight = kDefaultTitleBarHeight;
+  m_titleBarHeightResolved = false;
   m_focusedWindowId.reset();
   m_overviewKnown = false;
   m_overviewOpen = false;
@@ -222,6 +422,11 @@ void UmbrielWorkspaceBackend::handleStreamReset() {
 }
 
 void UmbrielWorkspaceBackend::handleEvent(std::string_view event, const nlohmann::json& data) {
+  if (event == "theme") {
+    refreshTitleBarHeight(true);
+    return;
+  }
+
   if (event == "workspaces") {
     if (!data.is_array()) {
       kLog.warn("workspaces snapshot must be an array");
@@ -247,6 +452,7 @@ void UmbrielWorkspaceBackend::handleEvent(std::string_view event, const nlohmann
   }
 
   if (event == "windows") {
+    refreshTitleBarHeight(false);
     if (!data.is_array()) {
       kLog.warn("windows snapshot must be an array");
       bool changed = false;
@@ -276,9 +482,23 @@ void UmbrielWorkspaceBackend::handleEvent(std::string_view event, const nlohmann
       window.workspaceId = jsonString(entry, "workspace");
       window.appId = jsonString(entry, "app_id");
       window.title = jsonString(entry, "title");
-      window.active = entry.value("active", false);
-      window.x = entry.value("x", 0);
-      window.y = entry.value("y", 0);
+      window.outputName = jsonString(entry, "output");
+      window.active = jsonBool(entry, "active");
+      window.pinned = jsonBool(entry, "pinned");
+      if (const auto visIt = entry.find("visible"); visIt != entry.end() && visIt->is_boolean()) {
+        window.visible = visIt->get<bool>();
+      }
+      window.x = jsonInt32(entry, "x");
+      window.y = jsonInt32(entry, "y");
+      window.width = jsonInt32(entry, "w");
+      window.height = jsonInt32(entry, "h");
+      const bool fullscreen = jsonBool(entry, "fullscreen");
+      window.hasTitleBar = !fullscreen && jsonBool(entry, "title_bar");
+      if (!fullscreen) {
+        if (const auto heightIt = entry.find("title_bar_height"); heightIt != entry.end()) {
+          window.titleBarHeight = jsonNonNegativeInt32(*heightIt);
+        }
+      }
       window.minimizeState = parseMinimizeState(entry);
       if (window.active && !focused.has_value()) {
         focused = id;
@@ -296,12 +516,22 @@ void UmbrielWorkspaceBackend::handleEvent(std::string_view event, const nlohmann
               && a.second.appId == b.second.appId
               && a.second.title == b.second.title;
         });
+    const bool nonGeometryWindowChanged =
+        workspaceChanged || !std::ranges::equal(next, m_windows, [](const auto& a, const auto& b) {
+          return a.first == b.first
+              && a.second.active == b.second.active
+              && a.second.minimizeState == b.second.minimizeState;
+        });
     m_focusedWindowId = std::move(focused);
     m_windows = std::move(next);
     if (workspaceChanged) {
       notifyChanged();
     }
-    notifyWindowsChanged();
+    if (!nonGeometryWindowChanged && m_windowGeometryChangeCallback) {
+      notifyWindowGeometryChanged();
+    } else {
+      notifyWindowsChanged();
+    }
     return;
   }
 
@@ -328,6 +558,12 @@ void UmbrielWorkspaceBackend::notifyChanged() const {
 void UmbrielWorkspaceBackend::notifyWindowsChanged() const {
   if (m_windowChangeCallback) {
     m_windowChangeCallback();
+  }
+}
+
+void UmbrielWorkspaceBackend::notifyWindowGeometryChanged() const {
+  if (m_windowGeometryChangeCallback) {
+    m_windowGeometryChangeCallback();
   }
 }
 

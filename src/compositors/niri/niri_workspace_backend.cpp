@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cmath>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <unordered_set>
@@ -107,6 +108,61 @@ namespace {
     return std::nullopt;
   }
 
+  std::optional<std::int32_t> jsonRoundedInt32(const nlohmann::json& json) {
+    if (const auto intVal = jsonInt32(json); intVal.has_value()) {
+      return intVal;
+    }
+    if (json.is_number_float()) {
+      const double value = json.get<double>();
+      if (std::isfinite(value)) {
+        return static_cast<std::int32_t>(std::lround(value));
+      }
+    }
+    return std::nullopt;
+  }
+
+  std::optional<WindowGeometry> parseNiriLayoutGeometry(const nlohmann::json& layout) {
+    if (!layout.is_object()) {
+      return std::nullopt;
+    }
+    const auto posIt = layout.find("tile_pos_in_workspace_view");
+    if (posIt == layout.end() || !posIt->is_array() || posIt->size() < 2) {
+      return std::nullopt;
+    }
+    const auto xOpt = jsonRoundedInt32((*posIt)[0]);
+    const auto yOpt = jsonRoundedInt32((*posIt)[1]);
+    if (!xOpt.has_value() || !yOpt.has_value()) {
+      return std::nullopt;
+    }
+
+    const nlohmann::json* sizeArr = nullptr;
+    if (const auto tileIt = layout.find("tile_size");
+        tileIt != layout.end() && tileIt->is_array() && tileIt->size() >= 2) {
+      sizeArr = &(*tileIt);
+    } else if (
+        const auto winIt = layout.find("window_size"); winIt != layout.end() && winIt->is_array() && winIt->size() >= 2
+    ) {
+      sizeArr = &(*winIt);
+    }
+    if (sizeArr == nullptr) {
+      return std::nullopt;
+    }
+
+    const auto wOpt = jsonRoundedInt32((*sizeArr)[0]);
+    const auto hOpt = jsonRoundedInt32((*sizeArr)[1]);
+    if (!wOpt.has_value() || !hOpt.has_value() || *wOpt <= 0 || *hOpt <= 0) {
+      return std::nullopt;
+    }
+
+    return WindowGeometry{
+        .x = *xOpt,
+        .y = *yOpt,
+        .width = *wOpt,
+        .height = *hOpt,
+        .globalCoordinates = false,
+    };
+  }
+
 } // namespace
 
 NiriWorkspaceBackend::NiriWorkspaceBackend(compositors::niri::NiriRuntime& runtime)
@@ -115,6 +171,10 @@ NiriWorkspaceBackend::NiriWorkspaceBackend(compositors::niri::NiriRuntime& runti
 NiriWorkspaceBackend::~NiriWorkspaceBackend() { cleanup(); }
 
 void NiriWorkspaceBackend::setChangeCallback(ChangeCallback callback) { m_changeCallback = std::move(callback); }
+
+void NiriWorkspaceBackend::setWindowGeometryChangeCallback(ChangeCallback callback) {
+  m_windowGeometryChangeCallback = std::move(callback);
+}
 
 void NiriWorkspaceBackend::setOverviewChangeCallback(ChangeCallback callback) {
   m_overviewChangeCallback = std::move(callback);
@@ -293,6 +353,10 @@ std::vector<WorkspaceWindow> NiriWorkspaceBackend::workspaceWindows(const std::s
             .x = window.x,
             .y = window.y,
             .outputName = {},
+            .minimizeState = std::nullopt,
+            .geometry = window.geometry,
+            .visibleOnScreen = std::nullopt,
+            .pinned = false,
         }
     );
   }
@@ -424,7 +488,11 @@ bool NiriWorkspaceBackend::handleWindowsChanged(const nlohmann::json& payload) {
   if (membershipChanged) {
     recomputeOccupancy();
   }
-  return membershipChanged || focusUpdated;
+  if (membershipChanged || focusUpdated) {
+    return true;
+  }
+  notifyWindowGeometryChanged();
+  return false;
 }
 
 bool NiriWorkspaceBackend::handleOverviewChanged(const nlohmann::json& payload) {
@@ -494,12 +562,19 @@ bool NiriWorkspaceBackend::handleWindowOpenedOrChanged(const nlohmann::json& pay
   const bool membershipChanged = existing == m_windows.end() ? (state.workspaceId.has_value() || !state.appId.empty())
                                                              : !sameWindowMembership(existing->second, state);
   const bool layoutChanged = existing != m_windows.end() && !sameWindowLayout(existing->second, state);
+  const bool geometryChanged = existing == m_windows.end() || existing->second.geometry != state.geometry;
   m_windows[*id] = state;
   if (membershipChanged) {
     recomputeOccupancy();
   }
 
-  return membershipChanged || layoutChanged || focusUpdated;
+  if (membershipChanged || layoutChanged || focusUpdated) {
+    return true;
+  }
+  if (geometryChanged) {
+    notifyWindowGeometryChanged();
+  }
+  return false;
 }
 
 bool NiriWorkspaceBackend::handleWindowLayoutsChanged(const nlohmann::json& payload) {
@@ -509,6 +584,7 @@ bool NiriWorkspaceBackend::handleWindowLayoutsChanged(const nlohmann::json& payl
   }
 
   bool changed = false;
+  bool geometryChanged = false;
   for (const auto& item : *changes) {
     if (!item.is_array() || item.size() < 2) {
       continue;
@@ -524,6 +600,11 @@ bool NiriWorkspaceBackend::handleWindowLayoutsChanged(const nlohmann::json& payl
     auto it = m_windows.find(id);
     if (it == m_windows.end()) {
       continue;
+    }
+
+    if (const auto nextGeometry = parseNiriLayoutGeometry(layout); it->second.geometry != nextGeometry) {
+      it->second.geometry = nextGeometry;
+      geometryChanged = true;
     }
 
     if (layout.contains("pos_in_scrolling_layout")) {
@@ -543,6 +624,10 @@ bool NiriWorkspaceBackend::handleWindowLayoutsChanged(const nlohmann::json& payl
         }
       }
     }
+  }
+
+  if (!changed && geometryChanged) {
+    notifyWindowGeometryChanged();
   }
 
   // Layout positions are useful when a taskbar asks for ordering, but they do
@@ -675,6 +760,10 @@ bool NiriWorkspaceBackend::applyWindowFields(const nlohmann::json& json, WindowS
 
   if (json.contains("layout")) {
     const auto& layout = json["layout"];
+    if (const auto nextGeometry = parseNiriLayoutGeometry(layout); state.geometry != nextGeometry) {
+      state.geometry = nextGeometry;
+      changed = true;
+    }
     if (layout.contains("pos_in_scrolling_layout")) {
       const auto& pos = layout["pos_in_scrolling_layout"];
       if (pos.is_array() && pos.size() >= 2) {
@@ -762,6 +851,12 @@ void NiriWorkspaceBackend::recomputeOccupancy() {
 void NiriWorkspaceBackend::notifyChanged() const {
   if (m_changeCallback) {
     m_changeCallback();
+  }
+}
+
+void NiriWorkspaceBackend::notifyWindowGeometryChanged() const {
+  if (m_windowGeometryChangeCallback) {
+    m_windowGeometryChangeCallback();
   }
 }
 

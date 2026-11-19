@@ -295,6 +295,10 @@ std::vector<WorkspaceWindow> WaylandWorkspaces::workspaceWindows(wl_output* outp
   return m_activeBackend != nullptr ? m_activeBackend->workspaceWindows(output) : std::vector<WorkspaceWindow>{};
 }
 
+std::vector<WorkspaceWindow> WaylandWorkspaces::collisionWindows(wl_output* output) const {
+  return m_activeBackend != nullptr ? m_activeBackend->collisionWindows(output) : std::vector<WorkspaceWindow>{};
+}
+
 std::vector<std::string> WaylandWorkspaces::openOverlayWorkspaceKeys(wl_output* output) const {
   return m_activeBackend != nullptr ? m_activeBackend->openOverlayWorkspaceKeys(output) : std::vector<std::string>{};
 }

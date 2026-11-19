@@ -520,6 +520,9 @@ namespace {
                   .x = window.x,
                   .y = window.y,
                   .minimizeState = window.minimizeState,
+                  .geometry = window.geometry,
+                  .visibleOnScreen = window.visibleOnScreen,
+                  .pinned = window.pinned,
               }
           );
           continue;
@@ -534,6 +537,9 @@ namespace {
                   .x = window.x,
                   .y = window.y,
                   .minimizeState = window.minimizeState,
+                  .geometry = window.geometry,
+                  .visibleOnScreen = window.visibleOnScreen,
+                  .pinned = window.pinned,
               }
           );
         }
@@ -549,6 +555,9 @@ namespace {
               .x = window.x,
               .y = window.y,
               .minimizeState = window.minimizeState,
+              .geometry = window.geometry,
+              .visibleOnScreen = window.visibleOnScreen,
+              .pinned = window.pinned,
           }
       );
     }
@@ -612,6 +621,7 @@ CompositorPlatform::CompositorPlatform(WaylandConnection& wayland)
   m_workspaceMetadataBackend = createWorkspaceMetadataBackend(*m_runtimeRegistry);
   if (m_workspaceMetadataBackend != nullptr) {
     m_workspaceMetadataBackend->setWindowChangeCallback([this] { notifyToplevelsChanged(); });
+    m_workspaceMetadataBackend->setWindowGeometryChangeCallback([this] { notifyWindowGeometryChanged(); });
   }
   if (auto* labwcBackend = dynamic_cast<LabwcWorkspaceBackend*>(m_workspaceMetadataBackend.get());
       labwcBackend != nullptr) {
@@ -651,10 +661,12 @@ CompositorPlatform::CompositorPlatform(WaylandConnection& wayland)
 
 CompositorPlatform::~CompositorPlatform() {
   m_toplevelChangeCallback = {};
+  m_windowGeometryChangeCallback = {};
   m_workspaceChangeCallback = {};
   if (m_workspaceMetadataBackend != nullptr) {
     m_workspaceMetadataBackend->setChangeCallback({});
     m_workspaceMetadataBackend->setWindowChangeCallback({});
+    m_workspaceMetadataBackend->setWindowGeometryChangeCallback({});
     m_workspaceMetadataBackend->setOverviewChangeCallback({});
   }
   cleanup();
@@ -673,6 +685,7 @@ void CompositorPlatform::startKdeActiveWindow(SessionBus& bus) {
 
   m_kwinActiveWindow = std::make_unique<compositors::kde::KwinActiveWindow>(bus);
   m_kwinActiveWindow->setChangeCallback([this] { notifyToplevelsChanged(); });
+  m_kwinActiveWindow->setGeometryChangeCallback([this] { notifyWindowGeometryChanged(); });
   m_kwinActiveWindow->start();
 }
 
@@ -1167,6 +1180,10 @@ void CompositorPlatform::setToplevelChangeCallback(ChangeCallback callback) {
   m_toplevelChangeCallback = std::move(callback);
 }
 
+void CompositorPlatform::setWindowGeometryChangeCallback(ChangeCallback callback) {
+  m_windowGeometryChangeCallback = std::move(callback);
+}
+
 void CompositorPlatform::bindHyprlandToplevelMappingManager(hyprland_toplevel_mapping_manager_v1* manager) {
   if (manager == nullptr) {
     if (m_hyprlandToplevelMapping != nullptr) {
@@ -1206,6 +1223,14 @@ void CompositorPlatform::notifyToplevelsChanged() {
     m_workspaceChangeCallback();
   }
   if (m_toplevelChangeCallback) {
+    m_toplevelChangeCallback();
+  }
+}
+
+void CompositorPlatform::notifyWindowGeometryChanged() {
+  if (m_windowGeometryChangeCallback) {
+    m_windowGeometryChangeCallback();
+  } else if (m_toplevelChangeCallback) {
     m_toplevelChangeCallback();
   }
 }
@@ -1346,8 +1371,13 @@ void CompositorPlatform::setWorkspaceChangeCallback(ChangeCallback callback) {
   auto wrapper = [this] {
     auto nextSnapshot = workspaceModelSnapshot();
     auto nextFocused = focusedCompositorWindowId();
-    if (sameWorkspaceModelSnapshot(nextSnapshot, m_lastWorkspaceModelSnapshot)
-        && nextFocused == m_lastFocusedCompositorWindowId) {
+    const bool modelSame = sameWorkspaceModelSnapshot(nextSnapshot, m_lastWorkspaceModelSnapshot)
+        && nextFocused == m_lastFocusedCompositorWindowId;
+    if (modelSame) {
+      if (!sameCollisionSnapshot(nextSnapshot, m_lastWorkspaceModelSnapshot)) {
+        m_lastWorkspaceModelSnapshot = std::move(nextSnapshot);
+        notifyWindowGeometryChanged();
+      }
       return;
     }
     m_lastWorkspaceModelSnapshot = std::move(nextSnapshot);
@@ -1569,6 +1599,32 @@ std::vector<std::string> CompositorPlatform::workspaceDisplayKeys(wl_output* out
   return {};
 }
 
+namespace {
+
+  std::vector<WorkspaceWindowAssignment> toWindowAssignments(const std::vector<WorkspaceWindow>& windows) {
+    std::vector<WorkspaceWindowAssignment> result;
+    result.reserve(windows.size());
+    for (const auto& window : windows) {
+      result.push_back(
+          WorkspaceWindowAssignment{
+              .windowId = window.windowId,
+              .workspaceKey = window.workspaceKey,
+              .appId = window.appId,
+              .title = window.title,
+              .x = window.x,
+              .y = window.y,
+              .minimizeState = window.minimizeState,
+              .geometry = window.geometry,
+              .visibleOnScreen = window.visibleOnScreen,
+              .pinned = window.pinned,
+          }
+      );
+    }
+    return result;
+  }
+
+} // namespace
+
 std::vector<WorkspaceWindowAssignment> CompositorPlatform::workspaceWindowAssignments(wl_output* outputFilter) const {
   syncLabwcMetadata();
   if (compositors::isKde() && m_kwinActiveWindow != nullptr && m_kwinActiveWindow->isAvailable()) {
@@ -1585,23 +1641,26 @@ std::vector<WorkspaceWindowAssignment> CompositorPlatform::workspaceWindowAssign
   if (windows.empty() && m_workspaces != nullptr) {
     windows = m_workspaces->workspaceWindows(outputFilter);
   }
+  return toWindowAssignments(windows);
+}
 
-  std::vector<WorkspaceWindowAssignment> result;
-  result.reserve(windows.size());
-  for (const auto& window : windows) {
-    result.push_back(
-        WorkspaceWindowAssignment{
-            .windowId = window.windowId,
-            .workspaceKey = window.workspaceKey,
-            .appId = window.appId,
-            .title = window.title,
-            .x = window.x,
-            .y = window.y,
-            .minimizeState = window.minimizeState,
-        }
-    );
+std::vector<WorkspaceWindowAssignment> CompositorPlatform::collisionWindows(wl_output* outputFilter) const {
+  syncLabwcMetadata();
+  if (compositors::isKde() && m_kwinActiveWindow != nullptr && m_kwinActiveWindow->isAvailable()) {
+    const auto tracked =
+        kdeTrackedWindowsForOutput(m_kwinActiveWindow->trackedWorkspaceWindows(), connectorNameForOutput(outputFilter));
+    if (!tracked.empty()) {
+      return kdeWorkspaceAssignmentsFromTracked(tracked, this->workspaces(outputFilter));
+    }
   }
-  return result;
+  std::vector<WorkspaceWindow> windows;
+  if (m_workspaceMetadataBackend != nullptr) {
+    windows = m_workspaceMetadataBackend->collisionWindows(connectorNameForOutput(outputFilter));
+  }
+  if (windows.empty() && m_workspaces != nullptr) {
+    windows = m_workspaces->collisionWindows(outputFilter);
+  }
+  return toWindowAssignments(windows);
 }
 
 std::vector<std::string> CompositorPlatform::openOverlayWorkspaceKeys(wl_output* outputFilter) const {
@@ -1977,6 +2036,7 @@ std::vector<CompositorPlatform::WorkspaceModelSnapshot> CompositorPlatform::work
         .outputName = output != nullptr ? output->name : 0,
         .workspaces = workspaces(wlOutput),
         .assignments = sortedAssignments(workspaceWindowAssignments(wlOutput)),
+        .collision = sortedAssignments(collisionWindows(wlOutput)),
     };
   };
 
@@ -2030,6 +2090,34 @@ bool CompositorPlatform::sameWorkspaceModelSnapshot(
     }
     for (std::size_t a = 0; a < lhs[i].assignments.size(); ++a) {
       if (!sameAssignment(lhs[i].assignments[a], rhs[i].assignments[a])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool CompositorPlatform::sameCollisionSnapshot(
+    const std::vector<WorkspaceModelSnapshot>& lhs, const std::vector<WorkspaceModelSnapshot>& rhs
+) {
+  auto sameCollision = [](const WorkspaceWindowAssignment& a, const WorkspaceWindowAssignment& b) {
+    return a.windowId == b.windowId
+        && a.workspaceKey == b.workspaceKey
+        && a.geometry == b.geometry
+        && a.visibleOnScreen == b.visibleOnScreen
+        && a.pinned == b.pinned
+        && a.minimizeState == b.minimizeState;
+  };
+
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    if (lhs[i].outputName != rhs[i].outputName || lhs[i].collision.size() != rhs[i].collision.size()) {
+      return false;
+    }
+    for (std::size_t c = 0; c < lhs[i].collision.size(); ++c) {
+      if (!sameCollision(lhs[i].collision[c], rhs[i].collision[c])) {
         return false;
       }
     }

@@ -26,6 +26,18 @@ struct Workspace {
   bool occupied = false;
 };
 
+struct WindowGeometry {
+  std::int32_t x = 0;
+  std::int32_t y = 0;
+  std::int32_t width = 0;
+  std::int32_t height = 0;
+  // True when x/y are in global compositor layout coordinates (subtract output logicalX/Y);
+  // false when x/y are already output-local (e.g., Niri tile_pos_in_workspace_view).
+  bool globalCoordinates = true;
+
+  bool operator==(const WindowGeometry&) const = default;
+};
+
 struct WorkspaceWindow {
   std::string windowId;
   std::string workspaceKey;
@@ -35,6 +47,11 @@ struct WorkspaceWindow {
   std::int32_t y = 0;
   std::string outputName;
   std::optional<WindowMinimizeState> minimizeState;
+  std::optional<WindowGeometry> geometry;
+  // Known on-screen visibility from compositor IPC (e.g., Umbriel/Sway/Hyprland);
+  // std::nullopt when unknown and inferred from active workspace + !minimized.
+  std::optional<bool> visibleOnScreen;
+  bool pinned = false;
 };
 
 struct WorkspaceWindowAssignment {
@@ -45,6 +62,9 @@ struct WorkspaceWindowAssignment {
   std::int32_t x = 0;
   std::int32_t y = 0;
   std::optional<WindowMinimizeState> minimizeState;
+  std::optional<WindowGeometry> geometry;
+  std::optional<bool> visibleOnScreen;
+  bool pinned = false;
 };
 
 struct TaskbarWindowCandidate {
@@ -81,6 +101,9 @@ public:
     return {};
   }
   virtual std::vector<WorkspaceWindow> workspaceWindows(wl_output* /*output*/) const { return {}; }
+  // Windows on `output` relevant for screen-edge collision checks (may include pinned
+  // or overlay-workspace windows omitted from regular workspaceWindows()).
+  virtual std::vector<WorkspaceWindow> collisionWindows(wl_output* output) const { return workspaceWindows(output); }
   // Workspace keys of the overlay workspaces currently open on `output` (nullptr = every
   // output), such as Hyprland special workspaces, which backends hide from all()/forOutput().
   // Non-empty means the overlay supersedes the reported active workspace. Keys use the
@@ -148,6 +171,11 @@ namespace compositors {
     // Overrides take ownership of the callback.
     // NOLINTNEXTLINE(performance-unnecessary-value-param)
     virtual void setWindowChangeCallback(ChangeCallback callback) { (void)callback; }
+    // Lightweight callback fired when only window geometry/visibility changes, allowing
+    // collision-based smart_auto_hide to re-evaluate without full widget/taskbar refreshes.
+    // Overrides take ownership of the callback.
+    // NOLINTNEXTLINE(performance-unnecessary-value-param)
+    virtual void setWindowGeometryChangeCallback(ChangeCallback callback) { (void)callback; }
     // Overrides take ownership of the callback.
     // NOLINTNEXTLINE(performance-unnecessary-value-param)
     virtual void setOverviewChangeCallback(ChangeCallback callback) { (void)callback; }
@@ -162,6 +190,9 @@ namespace compositors {
       return {};
     }
     virtual std::vector<WorkspaceWindow> workspaceWindows(const std::string& /*outputName*/ = {}) const { return {}; }
+    virtual std::vector<WorkspaceWindow> collisionWindows(const std::string& outputName = {}) const {
+      return workspaceWindows(outputName);
+    }
     // True when ext-foreign-toplevel identifiers produced by this compositor
     // are exact compositor window IDs suitable for focus/close actions and
     // stable taskbar identity. Backends return true when they can join those

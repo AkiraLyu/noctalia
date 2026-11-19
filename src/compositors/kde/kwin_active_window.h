@@ -34,6 +34,7 @@ namespace compositors::kde {
     void start();
     void stop();
     void setChangeCallback(ChangeCallback callback);
+    void setGeometryChangeCallback(ChangeCallback callback);
 
     std::optional<ActiveToplevel> current() const;
     std::vector<std::string> runningAppIds() const;
@@ -56,6 +57,7 @@ namespace compositors::kde {
       std::string outputName;
       std::vector<std::string> desktopIds;
       std::optional<WindowMinimizeState> minimizeState;
+      std::optional<WindowGeometry> geometry;
     };
 
     bool ensureScriptFile(std::string& scriptPath) const;
@@ -65,10 +67,12 @@ namespace compositors::kde {
     void onNotifyActiveWindow(const std::string& caption, const std::string& resourceClass, const std::string& uuid);
     void onNotifyWindowList(const std::string& payload);
     void notifyChanged() const;
+    void notifyGeometryChanged() const;
 
     SessionBus& m_bus;
     std::unique_ptr<sdbus::IObject> m_object;
     ChangeCallback m_changeCallback;
+    ChangeCallback m_geometryChangeCallback;
     std::optional<ActiveToplevel> m_current;
     std::vector<TrackedWindow> m_trackedWindows;
     bool m_scriptInstalled = false;
