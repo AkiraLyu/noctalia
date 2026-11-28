@@ -50,6 +50,7 @@ namespace compositors::umbriel {
     bool available() const;
     const std::string& socketPath() const;
     std::optional<nlohmann::json> requestCommand(std::string_view cmd) const;
+    std::optional<nlohmann::json> requestConfigValue(std::string_view key) const;
     // Runs an umbriel action. `fields` holds its typed arguments, such as {"window": id}.
     bool requestAction(std::string_view action, nlohmann::json fields = nlohmann::json::object()) const;
     void refresh();

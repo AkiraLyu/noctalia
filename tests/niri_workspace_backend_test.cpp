@@ -94,6 +94,33 @@ int main() {
       window41 != windows.end() && window41->workspaceKey == "development" && window41->x == 2 && window41->y == 1
   );
 
+  int geometryChanges = 0;
+  backend.setWindowGeometryChangeCallback([&] { ++geometryChanges; });
+  backend.handleEvent(
+      "WindowLayoutsChanged",
+      {{"changes",
+        {
+            {41,
+             {{"pos_in_scrolling_layout", {2, 1}},
+              {"tile_pos_in_workspace_view", {120.4, 48.6}},
+              {"tile_size", {800.0, 960.0}}}},
+        }}}
+  );
+  // Tile pixel geometry updates without changing pos_in_scrolling_layout must route to
+  // geometryChanges only, leaving `changes` untouched.
+  TEST_CHECK(changes == 3);
+  TEST_CHECK(geometryChanges == 1);
+  windows = backend.workspaceWindows();
+  const auto window41AfterGeo = std::ranges::find(windows, "41", &WorkspaceWindow::windowId);
+  TEST_CHECK(window41AfterGeo != windows.end() && window41AfterGeo->geometry.has_value());
+  TEST_CHECK(
+      window41AfterGeo->geometry->x == 120
+      && window41AfterGeo->geometry->y == 49
+      && window41AfterGeo->geometry->width == 800
+      && window41AfterGeo->geometry->height == 960
+      && !window41AfterGeo->geometry->globalCoordinates
+  );
+
   std::string request;
   int serverError = 0;
   std::jthread server([&] {

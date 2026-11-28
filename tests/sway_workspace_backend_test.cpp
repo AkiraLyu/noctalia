@@ -68,5 +68,26 @@ int main() {
 
   // No sway IPC socket in a test, so the capability stays off and callers keep their fallback.
   TEST_CHECK(!backend.publishesExtToplevelIdentity());
+
+  // Parse rect geometry and visible flag from GET_TREE.
+  auto visibleView = viewNode("foot", "foot", true, "tok-geo");
+  visibleView["visible"] = true;
+  visibleView["rect"] = {{"x", 100}, {"y", 40}, {"width", 800}, {"height", 600}};
+  auto hiddenTab = viewNode("firefox", "firefox", false, "tok-hidden");
+  hiddenTab["visible"] = false;
+  hiddenTab["rect"] = {{"x", 0}, {"y", 0}, {"width", 1920}, {"height", 1080}};
+  backend.parseTree(tree(false, {visibleView, hiddenTab}));
+  const auto windows = backend.workspaceWindows(nullptr);
+  TEST_CHECK(windows.size() == 2);
+  TEST_CHECK(windows[0].geometry.has_value());
+  TEST_CHECK(
+      windows[0].geometry->x == 100
+      && windows[0].geometry->y == 40
+      && windows[0].geometry->width == 800
+      && windows[0].geometry->height == 600
+      && windows[0].geometry->globalCoordinates
+  );
+  TEST_CHECK(windows[0].visibleOnScreen == std::optional<bool>(true));
+  TEST_CHECK(windows[1].visibleOnScreen == std::optional<bool>(false));
   return 0;
 }

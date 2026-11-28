@@ -257,9 +257,15 @@ namespace shell::dock {
         callbacks.rebuildItems(instance);
       }
 
+      const auto totalItemCount = instance.items.size() + shell::dock::dockLauncherButtonCount(cfg);
+      instance.panelGeometry = shell::dock::computePanelGeometry(cfg, shadowConfig, w, h, totalItemCount);
+
       if (dockUsesAnyAutoHide(cfg)) {
         instance.smartAutoHidePinnedVisible =
-            cfg.smartAutoHide && shell::smart_auto_hide::smartWantsPinnedVisible(deps.platform, instance.output);
+            cfg.smartAutoHide
+            && shell::smartAutoHideWantsPinnedVisible(
+                deps.platform, instance.output, dockSmartAutoHideRect(instance, shadowConfig)
+            );
         instance.slideRoot->setOpacity(1.0F);
         const bool startHidden = cfg.smartAutoHide ? !instance.smartAutoHidePinnedVisible : cfg.autoHide;
         instance.hideOpacity = startHidden ? 0.0F : 1.0F;
@@ -278,10 +284,11 @@ namespace shell::dock {
       instance.panel->setCornerShapes(concave.corners);
       instance.panel->setLogicalInset(concave.logicalInset);
       instance.panel->setRadii(concave.radii);
+      const auto totalItemCount = instance.items.size() + shell::dock::dockLauncherButtonCount(cfg);
+      instance.panelGeometry = shell::dock::computePanelGeometry(cfg, shadowConfig, w, h, totalItemCount);
     }
 
     const auto totalItemCount = instance.items.size() + shell::dock::dockLauncherButtonCount(cfg);
-    instance.panelGeometry = shell::dock::computePanelGeometry(cfg, shadowConfig, w, h, totalItemCount);
     const auto& panelGeometry = instance.panelGeometry;
 
     // Update root size on reconfigure.
@@ -450,6 +457,42 @@ namespace shell::dock {
     if (inst.surface) {
       inst.surface->requestRedraw();
     }
+  }
+
+  shell::SmartAutoHideRect dockSmartAutoHideRect(const DockInstance& instance, const ShadowStyle& shadowConfig) {
+    const auto& cfg = instance.config;
+    const auto lsCfg = shell::dock::makeLayerSurfaceConfig(
+        cfg, shadowConfig, instance.fractionalScale, instance.outputLogicalWidth, instance.outputLogicalHeight
+    );
+    std::uint32_t anchor = lsCfg.anchor;
+    std::int32_t mTop = lsCfg.marginTop;
+    std::int32_t mRight = lsCfg.marginRight;
+    std::int32_t mBottom = lsCfg.marginBottom;
+    std::int32_t mLeft = lsCfg.marginLeft;
+    std::int32_t surfW = static_cast<std::int32_t>(lsCfg.width);
+    std::int32_t surfH = static_cast<std::int32_t>(lsCfg.height);
+    if (instance.surface != nullptr && instance.surface->width() > 0 && instance.surface->height() > 0) {
+      anchor = instance.surface->anchor();
+      mTop = instance.surface->marginTop();
+      mRight = instance.surface->marginRight();
+      mBottom = instance.surface->marginBottom();
+      mLeft = instance.surface->marginLeft();
+      surfW = static_cast<std::int32_t>(instance.surface->width());
+      surfH = static_cast<std::int32_t>(instance.surface->height());
+    }
+
+    auto panel = instance.panelGeometry;
+    if (panel.panelW <= 0.0F || panel.panelH <= 0.0F) {
+      const auto totalItemCount = instance.items.size() + shell::dock::dockLauncherButtonCount(cfg);
+      panel = shell::dock::computePanelGeometry(
+          cfg, shadowConfig, static_cast<float>(surfW), static_cast<float>(surfH), totalItemCount
+      );
+    }
+
+    return shell::computeOutputLocalVisualRect(
+        anchor, mTop, mRight, mBottom, mLeft, surfW, surfH, instance.outputLogicalWidth, instance.outputLogicalHeight,
+        panel.panelX, panel.panelY, panel.panelW, panel.panelH
+    );
   }
 
 } // namespace shell::dock

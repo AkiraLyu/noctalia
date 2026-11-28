@@ -7,6 +7,7 @@
 #include "util/string_utils.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -157,6 +158,11 @@ function serializeWindow(window) {
   if (!uuid) {
     return "";
   }
+  const g = window.frameGeometry;
+  const gx = g ? Math.round(g.x) : 0;
+  const gy = g ? Math.round(g.y) : 0;
+  const gw = g ? Math.round(g.width) : 0;
+  const gh = g ? Math.round(g.height) : 0;
   return [
     uuid,
     window.resourceClass || "",
@@ -165,6 +171,10 @@ function serializeWindow(window) {
     outputNameFor(window),
     String(window.minimized),
     String(window.minimizable),
+    String(gx),
+    String(gy),
+    String(gw),
+    String(gh),
   ].join(FIELD_SEP);
 }
 
@@ -204,6 +214,9 @@ function wireWindow(window) {
   }
   if (typeof window.outputChanged !== "undefined") {
     window.outputChanged.connect(updateTracked);
+  }
+  if (typeof window.frameGeometryChanged !== "undefined") {
+    window.frameGeometryChanged.connect(updateTracked);
   }
   window.minimizedChanged.connect(updateTracked);
   window.minimizeableChanged.connect(updateTracked);
@@ -246,6 +259,20 @@ syncWindows();
   }
 
   std::string jsStringLiteral(const std::string& value) { return nlohmann::json(value).dump(); }
+
+  std::optional<std::int32_t> parseInt32Field(std::string_view text) {
+    if (text.empty()) {
+      return std::nullopt;
+    }
+    std::int32_t value = 0;
+    const auto* begin = text.data();
+    const auto* end = text.data() + text.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+      return std::nullopt;
+    }
+    return value;
+  }
 
   std::vector<std::string> splitString(std::string_view value, char separator) {
     std::vector<std::string> parts;
@@ -340,6 +367,10 @@ namespace compositors::kde {
 
   void KwinActiveWindow::setChangeCallback(ChangeCallback callback) { m_changeCallback = std::move(callback); }
 
+  void KwinActiveWindow::setGeometryChangeCallback(ChangeCallback callback) {
+    m_geometryChangeCallback = std::move(callback);
+  }
+
   std::optional<ActiveToplevel> KwinActiveWindow::current() const { return m_current; }
 
   std::vector<std::string> KwinActiveWindow::runningAppIds() const {
@@ -408,6 +439,7 @@ namespace compositors::kde {
                 .title = title,
                 .outputName = window.outputName,
                 .minimizeState = window.minimizeState,
+                .geometry = window.geometry,
             }
         );
         continue;
@@ -428,6 +460,8 @@ namespace compositors::kde {
                 .title = title,
                 .outputName = window.outputName,
                 .minimizeState = window.minimizeState,
+                .geometry = window.geometry,
+                .pinned = true,
             }
         );
         continue;
@@ -441,6 +475,7 @@ namespace compositors::kde {
                 .title = title,
                 .outputName = window.outputName,
                 .minimizeState = window.minimizeState,
+                .geometry = window.geometry,
             }
         );
       }
@@ -769,8 +804,8 @@ for (const window of workspace.windowList()) {{
         continue;
       }
       const auto fields = splitString(record, kFieldSeparator);
-      if (fields.size() != 7) {
-        kLog.warn("window-list snapshot requires exactly seven fields per window");
+      if (fields.size() != 7 && fields.size() != 11) {
+        kLog.warn("window-list snapshot requires 7 or 11 fields per window");
         continue;
       }
       TrackedWindow window{
@@ -780,6 +815,7 @@ for (const window of workspace.windowList()) {{
           .outputName = fields[4],
           .desktopIds = {},
           .minimizeState = std::nullopt,
+          .geometry = std::nullopt,
       };
       if (!fields[3].empty() && fields[3] != "*") {
         window.desktopIds = splitString(fields[3], ',');
@@ -791,6 +827,21 @@ for (const window of workspace.windowList()) {{
         };
       } else {
         kLog.warn("window-list snapshot requires boolean minimized and minimizable fields");
+      }
+      if (fields.size() == 11) {
+        const auto gx = parseInt32Field(fields[7]);
+        const auto gy = parseInt32Field(fields[8]);
+        const auto gw = parseInt32Field(fields[9]);
+        const auto gh = parseInt32Field(fields[10]);
+        if (gx.has_value() && gy.has_value() && gw.has_value() && gh.has_value() && *gw > 0 && *gh > 0) {
+          window.geometry = WindowGeometry{
+              .x = *gx,
+              .y = *gy,
+              .width = *gw,
+              .height = *gh,
+              .globalCoordinates = true,
+          };
+        }
       }
       if (window.uuid.empty()) {
         kLog.warn("window-list snapshot requires a window UUID");
@@ -820,14 +871,32 @@ for (const window of workspace.windowList()) {{
       }
       return false;
     }();
+    const bool geometryChanged = !changed && [&] {
+      for (std::size_t i = 0; i < next.size(); ++i) {
+        if (next[i].geometry != m_trackedWindows[i].geometry) {
+          return true;
+        }
+      }
+      return false;
+    }();
     m_trackedWindows = std::move(next);
     if (changed) {
       notifyChanged();
+    } else if (geometryChanged) {
+      notifyGeometryChanged();
     }
   }
 
   void KwinActiveWindow::notifyChanged() const {
     if (m_changeCallback) {
+      m_changeCallback();
+    }
+  }
+
+  void KwinActiveWindow::notifyGeometryChanged() const {
+    if (m_geometryChangeCallback) {
+      m_geometryChangeCallback();
+    } else if (m_changeCallback) {
       m_changeCallback();
     }
   }

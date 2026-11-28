@@ -4,8 +4,18 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <nlohmann/json.hpp>
+#include <poll.h>
+#include <string>
 #include <string_view>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -249,6 +259,306 @@ namespace {
     TEST_CHECK(fixture.windowChanges == 7);
   }
 
+  void checkGeometryAndCollisionWindows() {
+    Fixture fixture;
+    int geometryChanges = 0;
+    fixture.backend.setWindowGeometryChangeCallback([&] { ++geometryChanges; });
+
+    auto snapshot = nlohmann::json::array({
+        {
+            {"id", "w1"},
+            {"workspace", "DP-1:1"},
+            {"output", "DP-1"},
+            {"app_id", "foot"},
+            {"title", "Foot"},
+            {"active", true},
+            {"visible", true},
+            {"pinned", false},
+            {"x", 10},
+            {"y", 20},
+            {"w", 800},
+            {"h", 600},
+            {"minimized", false},
+            {"minimizable", true},
+        },
+        {
+            {"id", "scratch"},
+            {"workspace", ""},
+            {"output", "DP-1"},
+            {"app_id", "scratch.app"},
+            {"title", "Scratch"},
+            {"active", false},
+            {"visible", true},
+            {"pinned", false},
+            {"x", 100},
+            {"y", 100},
+            {"w", 400},
+            {"h", 300},
+            {"minimized", false},
+            {"minimizable", true},
+        },
+    });
+    fixture.backend.handleEvent("windows", snapshot);
+    TEST_CHECK(fixture.windowChanges == 1);
+    TEST_CHECK(geometryChanges == 0);
+    // workspaceWindows() still omits scratchpad windows without a workspace, while
+    // collisionWindows() includes visible scratchpad/pinned windows.
+    TEST_CHECK(fixture.backend.workspaceWindows("DP-1").size() == 1);
+    const auto collision = fixture.backend.collisionWindows("DP-1");
+    TEST_CHECK(collision.size() == 2);
+    const auto& w1 = windowForId(collision, "w1");
+    TEST_CHECK(w1.geometry.has_value());
+    TEST_CHECK(w1.geometry->x == 10 && w1.geometry->y == 20 && w1.geometry->width == 800 && w1.geometry->height == 600);
+    TEST_CHECK(w1.visibleOnScreen == std::optional<bool>(true));
+
+    // Geometry-only change routes to windowGeometryChangeCallback without triggering full windowChanges.
+    snapshot[0]["x"] = 250;
+    snapshot[0]["w"] = 900;
+    fixture.backend.handleEvent("windows", snapshot);
+    TEST_CHECK(fixture.windowChanges == 1);
+    TEST_CHECK(geometryChanges == 1);
+    const auto movedCollision = fixture.backend.collisionWindows("DP-1");
+    const auto& w1Moved = windowForId(movedCollision, "w1");
+    TEST_CHECK(w1Moved.geometry.has_value() && w1Moved.geometry->x == 250 && w1Moved.geometry->width == 900);
+  }
+
+  class ScopedEnvVar {
+  public:
+    ScopedEnvVar(const char* name, const char* value) : m_name(name) {
+      if (const char* prev = std::getenv(name); prev != nullptr) {
+        m_hadPrev = true;
+        m_prevValue = prev;
+      }
+      if (value != nullptr) {
+        ::setenv(name, value, 1);
+      } else {
+        ::unsetenv(name);
+      }
+    }
+
+    ~ScopedEnvVar() {
+      if (m_hadPrev) {
+        ::setenv(m_name.c_str(), m_prevValue.c_str(), 1);
+      } else {
+        ::unsetenv(m_name.c_str());
+      }
+    }
+
+  private:
+    std::string m_name;
+    bool m_hadPrev = false;
+    std::string m_prevValue;
+  };
+
+  void checkTitleBarCollisionGeometry() {
+    {
+      ScopedEnvVar envGuard("UMBRIEL_SOCKET", "/nonexistent/noctalia_umbriel_test.sock");
+      Fixture fixture;
+      int geometryChanges = 0;
+      fixture.backend.setWindowGeometryChangeCallback([&] { ++geometryChanges; });
+
+      auto snapshot = nlohmann::json::array({
+          {
+              {"id", "ssd"},
+              {"workspace", "DP-1:1"},
+              {"output", "DP-1"},
+              {"app_id", "foot"},
+              {"title", "SSD window"},
+              {"active", true},
+              {"visible", true},
+              {"pinned", false},
+              {"title_bar", true},
+              {"fullscreen", false},
+              {"x", 0},
+              {"y", 28},
+              {"w", 1200},
+              {"h", 700},
+              {"minimized", false},
+              {"minimizable", true},
+          },
+          {
+              {"id", "csd"},
+              {"workspace", "DP-1:1"},
+              {"output", "DP-1"},
+              {"app_id", "org.gnome.App"},
+              {"title", "CSD window"},
+              {"active", false},
+              {"visible", true},
+              {"pinned", false},
+              {"title_bar", false},
+              {"fullscreen", false},
+              {"x", 0},
+              {"y", 28},
+              {"w", 800},
+              {"h", 600},
+              {"minimized", false},
+              {"minimizable", true},
+          },
+          {
+              {"id", "fs"},
+              {"workspace", "DP-1:1"},
+              {"output", "DP-1"},
+              {"app_id", "mpv"},
+              {"title", "Fullscreen"},
+              {"active", false},
+              {"visible", true},
+              {"pinned", false},
+              {"title_bar", true},
+              {"fullscreen", true},
+              {"x", 0},
+              {"y", 0},
+              {"w", 1920},
+              {"h", 1080},
+              {"minimized", false},
+              {"minimizable", true},
+          },
+          {
+              {"id", "explicit"},
+              {"workspace", "DP-1:1"},
+              {"output", "DP-1"},
+              {"app_id", "alacritty"},
+              {"title", "Explicit height"},
+              {"active", false},
+              {"visible", true},
+              {"pinned", false},
+              {"title_bar", true},
+              {"title_bar_height", 36},
+              {"fullscreen", false},
+              {"x", 10},
+              {"y", 40},
+              {"w", 500},
+              {"h", 400},
+              {"minimized", false},
+              {"minimizable", true},
+          },
+      });
+      fixture.backend.handleEvent("windows", snapshot);
+      const auto windows = fixture.backend.collisionWindows("DP-1");
+
+      const auto& ssd = windowForId(windows, "ssd");
+      TEST_CHECK(ssd.y == 28);
+      TEST_CHECK(ssd.geometry.has_value());
+      TEST_CHECK(
+          ssd.geometry->x == 0 && ssd.geometry->y == 0 && ssd.geometry->width == 1200 && ssd.geometry->height == 728
+      );
+
+      const auto& csd = windowForId(windows, "csd");
+      TEST_CHECK(csd.geometry.has_value());
+      TEST_CHECK(
+          csd.geometry->x == 0 && csd.geometry->y == 28 && csd.geometry->width == 800 && csd.geometry->height == 600
+      );
+
+      const auto& fs = windowForId(windows, "fs");
+      TEST_CHECK(fs.geometry.has_value());
+      TEST_CHECK(
+          fs.geometry->x == 0 && fs.geometry->y == 0 && fs.geometry->width == 1920 && fs.geometry->height == 1080
+      );
+
+      const auto& explicitWin = windowForId(windows, "explicit");
+      TEST_CHECK(explicitWin.geometry.has_value());
+      TEST_CHECK(
+          explicitWin.geometry->x == 10
+          && explicitWin.geometry->y == 4
+          && explicitWin.geometry->width == 500
+          && explicitWin.geometry->height == 436
+      );
+
+      // Toggling title_bar routes through lightweight geometry re-evaluation.
+      snapshot[1]["title_bar"] = true;
+      fixture.backend.handleEvent("windows", snapshot);
+      TEST_CHECK(fixture.windowChanges == 1);
+      TEST_CHECK(geometryChanges == 1);
+      const auto updated = fixture.backend.collisionWindows("DP-1");
+      const auto& updatedCsd = windowForId(updated, "csd");
+      TEST_CHECK(updatedCsd.geometry.has_value() && updatedCsd.geometry->y == 0 && updatedCsd.geometry->height == 628);
+    }
+
+    // Verify querying Umbriel's configured appearance.title_bar.height via IPC and refreshing on theme events.
+    const std::string socketPath = "/tmp/noctalia_umbriel_titlebar_test_" + std::to_string(::getpid()) + ".sock";
+    ::unlink(socketPath.c_str());
+    const int serverFd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    TEST_CHECK(serverFd >= 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    TEST_CHECK(socketPath.size() < sizeof(addr.sun_path));
+    std::memcpy(addr.sun_path, socketPath.c_str(), socketPath.size() + 1);
+    TEST_CHECK(::bind(serverFd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0);
+    TEST_CHECK(::listen(serverFd, 4) == 0);
+
+    std::atomic<int> configuredHeight{34};
+    std::atomic<bool> stopServer{false};
+    std::thread serverThread([&] {
+      while (!stopServer.load()) {
+        pollfd pfd{.fd = serverFd, .events = POLLIN, .revents = 0};
+        if (::poll(&pfd, 1, 50) <= 0) {
+          continue;
+        }
+        const int clientFd = ::accept(serverFd, nullptr, nullptr);
+        if (clientFd < 0) {
+          break;
+        }
+        std::array<char, 512> buf{};
+        const ssize_t n = ::read(clientFd, buf.data(), buf.size());
+        if (n > 0) {
+          const std::string_view req(buf.data(), static_cast<std::size_t>(n));
+          if (req.contains("config-get")) {
+            const std::string reply =
+                "{\"ok\":{\"override\":false,\"value\":" + std::to_string(configuredHeight.load()) + "}}\n";
+            [[maybe_unused]] const ssize_t written = ::write(clientFd, reply.data(), reply.size());
+          }
+        }
+        ::close(clientFd);
+      }
+    });
+
+    {
+      ScopedEnvVar envGuard("UMBRIEL_SOCKET", socketPath.c_str());
+      Fixture fixture;
+      int geometryChanges = 0;
+      fixture.backend.setWindowGeometryChangeCallback([&] { ++geometryChanges; });
+
+      fixture.backend.handleEvent(
+          "windows",
+          nlohmann::json::array({{
+              {"id", "tiled"},
+              {"workspace", "DP-1:1"},
+              {"output", "DP-1"},
+              {"app_id", "foot"},
+              {"title", "Tiled"},
+              {"active", true},
+              {"visible", true},
+              {"pinned", false},
+              {"title_bar", true},
+              {"fullscreen", false},
+              {"x", 4},
+              {"y", 38},
+              {"w", 1000},
+              {"h", 700},
+              {"minimized", false},
+              {"minimizable", true},
+          }})
+      );
+      const auto initial = fixture.backend.collisionWindows("DP-1");
+      const auto& tiled = windowForId(initial, "tiled");
+      TEST_CHECK(tiled.geometry.has_value());
+      TEST_CHECK(tiled.geometry->y == 4 && tiled.geometry->height == 734);
+
+      configuredHeight.store(42);
+      fixture.backend.handleEvent("theme", nlohmann::json::object());
+      TEST_CHECK(geometryChanges == 1);
+      const auto reloaded = fixture.backend.collisionWindows("DP-1");
+      const auto& tiledReloaded = windowForId(reloaded, "tiled");
+      TEST_CHECK(tiledReloaded.geometry.has_value());
+      TEST_CHECK(tiledReloaded.geometry->y == -4 && tiledReloaded.geometry->height == 742);
+    }
+
+    stopServer.store(true);
+    ::shutdown(serverFd, SHUT_RDWR);
+    serverThread.join();
+    ::close(serverFd);
+    ::unlink(socketPath.c_str());
+  }
+
 } // namespace
 
 int main() {
@@ -256,5 +566,7 @@ int main() {
   checkMalformedStates();
   checkWorkspaceSnapshots();
   checkWorkspaceNotificationRouting();
+  checkGeometryAndCollisionWindows();
+  checkTitleBarCollisionGeometry();
   return 0;
 }

@@ -18,6 +18,8 @@ namespace shell::dock {
     float panelY = 0.0F;
     float panelW = 0.0F;
     float panelH = 0.0F;
+
+    bool operator==(const DockPanelGeometry&) const = default;
   };
 
   struct DockSurfaceGeometry {
